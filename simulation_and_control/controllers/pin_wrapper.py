@@ -138,6 +138,7 @@ class PinWrapper():
             conf_file_json = json.load(json_file)
 
         self.conf = conf_file_json
+        self.time_step = conf_file_json["sim"]["time_step"]
         self.base_type = self.conf['robot_pin']['base_type'][index]    
         self.res = ResultsFloatingBaseJoint(self.base_type)
         self.visualizer = visualizer
@@ -642,7 +643,10 @@ class PinWrapper():
             tau_ = np.concatenate((base_torque,tau_))
             acc = pin.aba(self.pin_model, self.pin_data, q_, qdot_, tau_)
         return acc
-
+    
+    def GetTimeStep(self):
+        return self.time_step
+    
     def GetTotalMassFromUrdf(self):
         mass = []
         pin.computeTotalMass(self.pin_model, self.pin_data)
