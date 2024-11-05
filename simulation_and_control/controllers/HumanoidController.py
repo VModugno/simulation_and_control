@@ -113,6 +113,59 @@ class Hrp4Controller:
         # initialize logger and plots
         self.logger = Logger(self.initial)
         self.logger.initialize_plot()
+
+    def UpdateEstimatedState(self,u):
+        # update kalman filter
+         #u = np.array([self.desired['zmp']['vel'][0], self.desired['zmp']['vel'][1]])
+         self.kf.predict(u)
+         x_flt, _ = self.kf.update(np.array([self.current['com']['pos'][0], self.current['com']['vel'][0], self.current['zmp']['pos'][0], \
+                                             self.current['com']['pos'][1], self.current['com']['vel'][1], self.current['zmp']['pos'][1]]))
+        
+         # update current state
+         self.current['com']['pos'][0] = x_flt[0]
+         self.current['com']['vel'][0] = x_flt[1]
+         self.current['zmp']['pos'][0] = x_flt[2]
+         self.current['com']['pos'][1] = x_flt[3]
+         self.current['com']['vel'][1] = x_flt[4]
+         self.current['zmp']['pos'][1] = x_flt[5]
+
+    
+    def ComputeController(self):
+        #     # get references using MPC
+    #     #self.desired['com']['pos'] = np.array([0., 0., 0.75])
+    #     lip_state, contact = self.mpc.solve(self.current, self.time)
+    #     if contact == 'ds':
+    #         pass
+    #     elif contact == 'ssleft':
+    #         self.contact = 'lsole'
+    #     elif contact == 'ssright':
+    #         self.contact = 'rsole'
+
+    #     self.desired['com']['pos'] = lip_state['com']['pos']
+    #     self.desired['com']['vel'] = lip_state['com']['vel']
+    #     self.desired['com']['acc'] = lip_state['com']['acc']
+    #     self.desired['zmp']['pos'] = lip_state['zmp']['pos']
+    #     self.desired['zmp']['vel'] = lip_state['zmp']['vel']
+
+    #     # get foot trajectories
+    #     feet_trajectories = self.foot_trajectory_generator.generate_feet_trajectories_at_time(self.time)
+    #     self.desired['lsole']['pos'] = feet_trajectories['left']['pos']
+    #     self.desired['lsole']['vel'] = feet_trajectories['left']['vel']
+    #     self.desired['lsole']['acc'] = feet_trajectories['left']['acc']
+    #     self.desired['rsole']['pos'] = feet_trajectories['right']['pos']
+    #     self.desired['rsole']['vel'] = feet_trajectories['right']['vel']
+    #     self.desired['rsole']['acc'] = feet_trajectories['right']['acc']
+
+    #     # set torso and base references to the average of the feet
+    #     self.desired['torso']['pos'] = (self.desired['lsole']['pos'][:3] + self.desired['rsole']['pos'][:3]) / 2.
+    #     self.desired['torso']['vel'] = (self.desired['lsole']['vel'][:3] + self.desired['rsole']['vel'][:3]) / 2.
+    #     self.desired['torso']['acc'] = (self.desired['lsole']['acc'][:3] + self.desired['rsole']['acc'][:3]) / 2.
+    #     self.desired['base']['pos']  = (self.desired['lsole']['pos'][:3] + self.desired['rsole']['pos'][:3]) / 2.
+    #     self.desired['base']['vel']  = (self.desired['lsole']['vel'][:3] + self.desired['rsole']['vel'][:3]) / 2.
+    #     self.desired['base']['acc']  = (self.desired['lsole']['acc'][:3] + self.desired['rsole']['acc'][:3]) / 2.
+
+    #     # get torque commands using inverse dynamics
+    #     commands = self.id.get_joint_torques(self.desired, self.current, contact)
         
     
 
