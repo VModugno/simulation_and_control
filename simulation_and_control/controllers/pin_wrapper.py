@@ -675,6 +675,11 @@ class PinWrapper():
     def getFeetId(self,feet_name):
         return self.feet_id[feet_name]
     
+    # it takes the name associated to the contact link (which is defined in the json file)
+    # and return the name of the frame in the pinocchio model
+    def getFeetLinkName(self,feet_name):
+        return self.pin_model.frames[self.feet_id[feet_name]].name
+    
     def DisplayModel(self,q):
         if(self.visualizer):
             q_ = self.ReoderJoints2PinVec(q,"pos")

@@ -895,17 +895,20 @@ class SimInterface():
     #         if not self.p.is_safe:
     #             return
 
-    def GetFootContacts(self):
+    def GetFootContacts(self,index=0):
         BODY_B_FIELD_NUMBER = 2
         LINK_A_FIELD_NUMBER = 3
-        all_contacts = self.pybullet_client.getContactPoints(bodyA=self.bot.bot_pybullet)
-        contacts = [False, False, False, False]
+        all_contacts = self.pybullet_client.getContactPoints(bodyA=self.bot[index].bot_pybullet)
+        # contacts need to be consistent with the number of feet 
+        # TODO (contacts is a dictionary with the feet name as keys)
+        number_of_feet = len(self.bot[index].foot_link_ids)
+        contacts = [False]*number_of_feet
         for contact in all_contacts:
             # Ignore self contacts
-            if contact[BODY_B_FIELD_NUMBER] == self.bot.bot_pybullet:
+            if contact[BODY_B_FIELD_NUMBER] == self.bot[index].bot_pybullet:
                 continue
             try:
-                toe_link_index = self.bot.foot_link_ids.index(
+                toe_link_index = self.bot[index].foot_link_ids.index(
                     contact[LINK_A_FIELD_NUMBER])
                 contacts[toe_link_index] = True
             except ValueError:
@@ -1857,24 +1860,24 @@ class SimInterface():
         return self.bot[index].foot_link_ids
     
     # this function returna dictionary where each element is the full GRF vector (6x1) for every feet Independtly if the feet is in contact or not (local frame)
-    def getFeetGRFLocal(self):
-        return self.bot.feet_grf_local
+    def getFeetGRFLocal(self,index=0):
+        return self.bot[index].feet_grf_local
     # this function the full GRF vector (6x1) for one foot Independtly if the foot is in contact or not (local frame)
-    def GetFootGRFLocal(self,foot):
-        return self.bot.feet_grf_local[foot]
+    def GetFootGRFLocal(self,foot,index=0):
+        return self.bot[index].feet_grf_local[foot]
     
     # this function returna dictionary where each element is the full GRF vector (6x1) for every feet Independtly if the feet is in contact or not (world frame)
-    def getFeetGRFWolrd(self):
-        return self.bot.feet_grf_world
+    def getFeetGRFWolrd(self,index=0):
+        return self.bot[index].feet_grf_world
     # this function the full GRF vector (6x1) for one foot Independtly if the foot is in contact or not (world frame)
-    def GetFootGRFWolrd(self,foot):
-        return self.bot.feet_grf_world[foot]
+    def GetFootGRFWolrd(self,foot,index=0):
+        return self.bot[index].feet_grf_world[foot]
     
     # TODO add this fucntion to 
-    def ComputeFootGRF(self):
+    def ComputeFootGRF(self, index=0):
         GRF ={}
-        for key, value in self.foot_link_sensors_ids.items():
-            GRF[key] = self.pybullet_client.getJointState(self.bot.bot_pybullet, value)[2]
+        for key, value in self.bot[index].foot_link_sensors_ids.items():
+            GRF[key] = self.pybullet_client.getJointState(self.bot[index].bot_pybullet, value)[2]
         return GRF
     
 
