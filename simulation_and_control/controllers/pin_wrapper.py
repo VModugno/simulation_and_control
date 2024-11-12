@@ -672,6 +672,9 @@ class PinWrapper():
     def getNumberofActuatedJoints(self):
         return self.n_q
     
+    def getFeetId(self,feet_name):
+        return self.feet_id[feet_name]
+    
     def DisplayModel(self,q):
         if(self.visualizer):
             q_ = self.ReoderJoints2PinVec(q,"pos")
