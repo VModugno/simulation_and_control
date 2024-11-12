@@ -50,11 +50,11 @@ class Hrp4Controller:
         
 
         # position the robot on the ground
-        lsole_pos = self.lsole.getTransform(withRespectTo=dart.dynamics.Frame.World(), inCoordinatesOf=dart.dynamics.Frame.World()).translation()
-        rsole_pos = self.rsole.getTransform(withRespectTo=dart.dynamics.Frame.World(), inCoordinatesOf=dart.dynamics.Frame.World()).translation()
-        self.hrp4.setPosition(3, - (lsole_pos[0] + rsole_pos[0]) / 2.)
-        self.hrp4.setPosition(4, - (lsole_pos[1] + rsole_pos[1]) / 2.)
-        self.hrp4.setPosition(5, - (lsole_pos[2] + rsole_pos[2]) / 2.)
+        #lsole_pos = self.lsole.getTransform(withRespectTo=dart.dynamics.Frame.World(), inCoordinatesOf=dart.dynamics.Frame.World()).translation()
+        #rsole_pos = self.rsole.getTransform(withRespectTo=dart.dynamics.Frame.World(), inCoordinatesOf=dart.dynamics.Frame.World()).translation()
+        #self.hrp4.setPosition(3, - (lsole_pos[0] + rsole_pos[0]) / 2.)
+        #self.hrp4.setPosition(4, - (lsole_pos[1] + rsole_pos[1]) / 2.)
+        #self.hrp4.setPosition(5, - (lsole_pos[2] + rsole_pos[2]) / 2.)
 
         # initialize state
         self.initial = self.retrieve_state()

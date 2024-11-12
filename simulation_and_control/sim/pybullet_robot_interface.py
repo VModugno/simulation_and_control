@@ -159,6 +159,14 @@ class SimRobot():
         # self.servoPositionGain = (self.conf['robot']["servo_pos_gains"]*np.ones((1, len(self.active_joint_ids)))).tolist()[0]
         # self.servoVelocityGain = (self.conf['robot']["servo_vel_gains"]*np.ones((1, len(self.active_joint_ids)))).tolist()[0]
 
+        # if init_motor_name_angles is defined and it is non empty i can use that list to initiliaze the robot joints
+        self.init_joint_angles_names = []
+        try:
+            self.init_joint_angles_names=self.conf['robot_pybullet']["init_motor_angles_names"][index]
+        except:
+            print("init_motor_angles_names not found in the config file,assuming it empty")
+           
+
         self.init_joint_angles = self.conf['robot_pybullet']["init_motor_angles"][index]
         # if self.conf['robot_pybullet']["init_motor_vel"] is not empty we use otherwise is zero
         if(self.conf['robot_pybullet']["init_motor_vel"][index]):
@@ -292,54 +300,100 @@ class SimRobot():
                                         -1,
                                         jointDamping=0)
             
-    def _BuildFeetJointIDAndForceSensors(self, pybullet_client,index):
+    # def _BuildFeetJointIDAndForceSensors(self, pybullet_client,index):
 
-        # check if self.conf['enable_feet_joint_force_sensors']['feet_contact_names'] is not empty
-        if(self.conf['robot_pybullet']['enable_feet_joint_force_sensors'][index]):
-            # build the dictionary of feet id and the feet reference frame to stadanrd name
-            self.feet_force_sensor_frame_2_id = {}
-            # find common elements between the list of contact point and the list of frame associate with each foot 
-            fl_contact_frame = list(set(self.conf['robot_pybullet']['enable_feet_joint_force_sensors'][index]) & set(self.conf['sim']['FL'][index]))
-            if(not fl_contact_frame):
-                raise ValueError("FL sensor frame not found in the list of contact frames, check enable_feet_joint_force_sensors under robot_pybullet and fl under sim in the config file")
-            else:
-                fl_contact_frame = fl_contact_frame[0]
-            fr_contact_frame = list(set(self.conf['robot_pybullet']['enable_feet_joint_force_sensors'][index]) & set(self.conf['sim']['FR'][index]))
-            if(not fr_contact_frame):
-                raise ValueError("FR sensor frame not found in the list of contact frames, check enable_feet_joint_force_sensors under robot_pybullet and fl under sim in the config file")
-            else:
-                fr_contact_frame = fr_contact_frame[0]
-            rl_contact_frame = list(set(self.conf['robot_pybullet']['enable_feet_joint_force_sensors'][index]) & set(self.conf['sim']['RL'][index]))
-            if(not rl_contact_frame):
-                raise ValueError("RL sensor frame not found in the list of contact frames, check enable_feet_joint_force_sensors under robot_pybullet and rl under sim in the config file")
-            else:
-                rl_contact_frame = rl_contact_frame[0]
-            rr_contact_frame = list(set(self.conf['robot_pybullet']['enable_feet_joint_force_sensors'][index]) & set(self.conf['sim']['RR'][index]))
-            if(not rr_contact_frame):
-                raise ValueError("RR sensor frame not found in the list of contact frames, check enable_feet_joint_force_sensors under robot_pybullet and rr under sim in the config file")
-            else:
-                rr_contact_frame = rr_contact_frame[0]
+    #     # check if self.conf['enable_feet_joint_force_sensors']['feet_contact_names'] is not empty
+    #     if(self.conf['robot_pybullet']['enable_feet_joint_force_sensors'][index]):
+    #         # build the dictionary of feet id and the feet reference frame to stadanrd name
+    #         self.feet_force_sensor_frame_2_id = {}
+    #         # find common elements between the list of contact point and the list of frame associate with each foot 
+    #         fl_contact_frame = list(set(self.conf['robot_pybullet']['enable_feet_joint_force_sensors'][index]) & set(self.conf['sim']['FL'][index]))
+    #         if(not fl_contact_frame):
+    #             raise ValueError("FL sensor frame not found in the list of contact frames, check enable_feet_joint_force_sensors under robot_pybullet and fl under sim in the config file")
+    #         else:
+    #             fl_contact_frame = fl_contact_frame[0]
+    #         fr_contact_frame = list(set(self.conf['robot_pybullet']['enable_feet_joint_force_sensors'][index]) & set(self.conf['sim']['FR'][index]))
+    #         if(not fr_contact_frame):
+    #             raise ValueError("FR sensor frame not found in the list of contact frames, check enable_feet_joint_force_sensors under robot_pybullet and fl under sim in the config file")
+    #         else:
+    #             fr_contact_frame = fr_contact_frame[0]
+    #         rl_contact_frame = list(set(self.conf['robot_pybullet']['enable_feet_joint_force_sensors'][index]) & set(self.conf['sim']['RL'][index]))
+    #         if(not rl_contact_frame):
+    #             raise ValueError("RL sensor frame not found in the list of contact frames, check enable_feet_joint_force_sensors under robot_pybullet and rl under sim in the config file")
+    #         else:
+    #             rl_contact_frame = rl_contact_frame[0]
+    #         rr_contact_frame = list(set(self.conf['robot_pybullet']['enable_feet_joint_force_sensors'][index]) & set(self.conf['sim']['RR'][index]))
+    #         if(not rr_contact_frame):
+    #             raise ValueError("RR sensor frame not found in the list of contact frames, check enable_feet_joint_force_sensors under robot_pybullet and rr under sim in the config file")
+    #         else:
+    #             rr_contact_frame = rr_contact_frame[0]
             
-        for _id in range(pybullet_client.getNumJoints(self.bot_pybullet)):
-            _link_name = pybullet_client.getJointInfo(self.bot_pybullet, _id)[12].decode('UTF-8')
-            _joint_name= pybullet_client.getJointInfo(self.bot_pybullet, _id)[1].decode("utf-8")
-            if _link_name in self.conf['sim']['feet_contact_names'][index]:
-                self.foot_link_ids[_link_name] = _id
-            #here i build the structure of the feet force sensors that i will use to measure the force in the feet 
-            # and i will associate this force to the FL FR RL RR label that generalize the feet contact and it is indepent from urdf
-            if(self.conf['robot_pybullet']['enable_feet_joint_force_sensors'][index]):
-                if _joint_name == fl_contact_frame:
-                    self.foot_link_sensors_ids["FL"] = _id
-                if _joint_name == fr_contact_frame:
-                    self.foot_link_sensors_ids["FR"] = _id
-                if _joint_name == rl_contact_frame:
-                    self.foot_link_sensors_ids["RL"] = _id
-                if _joint_name == rr_contact_frame:
-                    self.foot_link_sensors_ids["RR"] = _id    
+    #     for _id in range(pybullet_client.getNumJoints(self.bot_pybullet)):
+    #         _link_name = pybullet_client.getJointInfo(self.bot_pybullet, _id)[12].decode('UTF-8')
+    #         _joint_name= pybullet_client.getJointInfo(self.bot_pybullet, _id)[1].decode("utf-8")
+    #         if _link_name in self.conf['sim']['feet_contact_names'][index]:
+    #             self.foot_link_ids[_link_name] = _id
+    #         #here i build the structure of the feet force sensors that i will use to measure the force in the feet 
+    #         # and i will associate this force to the FL FR RL RR label that generalize the feet contact and it is indepent from urdf
+    #         if(self.conf['robot_pybullet']['enable_feet_joint_force_sensors'][index]):
+    #             if _joint_name == fl_contact_frame:
+    #                 self.foot_link_sensors_ids["FL"] = _id
+    #             if _joint_name == fr_contact_frame:
+    #                 self.foot_link_sensors_ids["FR"] = _id
+    #             if _joint_name == rl_contact_frame:
+    #                 self.foot_link_sensors_ids["RL"] = _id
+    #             if _joint_name == rr_contact_frame:
+    #                 self.foot_link_sensors_ids["RR"] = _id    
 
-                # here I enable the joint torque sensors for the feet
-                for id in  self.foot_link_sensors_ids.values():
-                    pybullet_client.enableJointForceTorqueSensor(self.bot_pybullet, id, True) 
+    #             # here I enable the joint torque sensors for the feet
+    #             for id in  self.foot_link_sensors_ids.values():
+    #                 pybullet_client.enableJointForceTorqueSensor(self.bot_pybullet, id, True) 
+
+    def _BuildFeetJointIDAndForceSensors(self, pybullet_client, index):
+        # Initialize dictionaries
+        self.foot_link_ids = {}
+        self.foot_link_sensors_ids = {}
+
+        # Check if foot force sensors are enabled
+        enable_sensors = self.conf['robot_pybullet']['enable_feet_joint_force_sensors'][index]
+        if not enable_sensors:
+            return  # Sensors are not enabled, exit the function
+
+        # Get the list of feet
+        feet_list = self.conf['sim']['feet'][index]  # Assuming 'feet' is a list and 'index' corresponds to the robot
+
+        # Loop over each foot
+        for foot in feet_list:
+            foot_name = foot['name']
+            sensor_frame = foot['sensor_frame']
+            contact_link_name = foot['contact_link_name']
+
+            # Find the joint ID for the sensor frame
+            sensor_joint_id = None
+            for _id in range(pybullet_client.getNumJoints(self.bot_pybullet)):
+                joint_info = pybullet_client.getJointInfo(self.bot_pybullet, _id)
+                joint_name = joint_info[1].decode("utf-8")
+                if joint_name == sensor_frame:
+                    sensor_joint_id = _id
+                    break
+            if sensor_joint_id is None:
+                raise ValueError(f"Sensor frame '{sensor_frame}' not found for foot '{foot_name}'.")
+            self.foot_link_sensors_ids[foot_name] = sensor_joint_id
+
+            # Enable the joint force torque sensor for this joint
+            pybullet_client.enableJointForceTorqueSensor(self.bot_pybullet, sensor_joint_id, True)
+
+            # Find the link ID for the contact link
+            link_id = None
+            for _id in range(pybullet_client.getNumJoints(self.bot_pybullet)):
+                joint_info = pybullet_client.getJointInfo(self.bot_pybullet, _id)
+                link_name = joint_info[12].decode('UTF-8')  # Link name
+                if link_name == contact_link_name:
+                    link_id = _id
+                    break
+            if link_id is None:
+                raise ValueError(f"Contact link '{contact_link_name}' not found for foot '{foot_name}'.")
+            self.foot_link_ids[contact_link_name] = link_id
 
     def _buildLinkNameToId(self,pybullet_client):
         num_joints = pybullet_client.getNumJoints(self.bot_pybullet)
@@ -724,7 +778,14 @@ class SimInterface():
         i  = 0
         for j in  range(len(self.bot)):
             i=0
-            for id in self.bot[j].active_joint_ids:
+            list_of_ids = []
+            if len(self.bot[j].init_joint_angles_names)>0:
+                for name in self.bot[j].init_joint_angles_names:
+                    list_of_ids.append(self.bot[j].joint_name_to_id[name])
+            else:
+               list_of_ids = self.bot[j].active_joint_ids
+                    
+            for id in list_of_ids:
                 # very important! this allows for the disabling of the motor at the joint level
                 # this is necessary to avoid the motor to fight against any kind of motion
                 # it acts as a joint with friction
@@ -1791,9 +1852,9 @@ class SimInterface():
                                                    link_id,
                                                    localInertiaDiagonal=inertia)
 
-    def GetFootLinkIDs(self):
+    def GetFootLinkIDs(self,index=0):
         """Get list of IDs for all foot links."""
-        return self.bot.foot_link_ids
+        return self.bot[index].foot_link_ids
     
     # this function returna dictionary where each element is the full GRF vector (6x1) for every feet Independtly if the feet is in contact or not (local frame)
     def getFeetGRFLocal(self):

@@ -145,26 +145,23 @@ class PinWrapper():
         urdf_file = self._UrdfPath(index,conf_file_path_ext)
         self._LoadPinURDF(urdf_file)
         # build the dictionary of feet id and the feet reference frame to standard name
-        self.feet_frame_2_standard_name = {}
-        # find common elements between the list of contact point and the list of frame associate with each foot 
-        # TODO this mechanism should be generalized for any number of contact (now it works only for 4 potential contact points, not flexilbe)
-        fl_contact_frame = list(set(self.conf['sim']['feet_contact_names'][index]) & set(self.conf['sim']['FL'][index]))
-        if len(fl_contact_frame) != 0:
-            self.feet_frame_2_standard_name["FL"] = fl_contact_frame[0]
-        fr_contact_frame = list(set(self.conf['sim']['feet_contact_names'][index]) & set(self.conf['sim']['FR'][index]))
-        if len(fr_contact_frame) != 0:
-            self.feet_frame_2_standard_name["FR"] = fr_contact_frame[0]
-        rl_contact_frame = list(set(self.conf['sim']['feet_contact_names'][index]) & set(self.conf['sim']['RL'][index]))
-        if len(rl_contact_frame) != 0:
-            self.feet_frame_2_standard_name["RL"] = rl_contact_frame[0]
-        rr_contact_frame = list(set(self.conf['sim']['feet_contact_names'][index]) & set(self.conf['sim']['RR'][index]))
-        if len(rr_contact_frame) != 0:
-            self.feet_frame_2_standard_name["RR"] = rr_contact_frame[0]
-        # here I need to iterate on the dictionary feet_frame_2_standard_name to get the id of the feet
+        # Initialize the dictionary mapping foot names to frame IDs
         self.feet_id = {}
-        for n in  self.feet_frame_2_standard_name.values():
-            self.feet_id[n] = self.pin_model.getFrameId(n)
-            
+
+        # Get the list of feet from the configuration
+        feet_list = self.conf['sim']['feet'][index]
+
+        # Iterate over each foot in the configuration
+        for foot in feet_list:
+            foot_name = foot['name']
+            contact_link_name = foot['contact_link_name']
+
+            # Get the frame ID from the Pinocchio model
+            frame_id = self.pin_model.getFrameId(contact_link_name)
+
+            # Store the mapping from foot name to frame ID
+            self.feet_id[foot_name] = frame_id
+                    
         # adding mechanism to convert the joint state from the robot to the pinocchio model    
         if self.conf['robot_pin']['joint_state_conversion_active'][index]:
             self.ext2pin = OrderedDict()
@@ -327,9 +324,9 @@ class PinWrapper():
             self.res.J_q = self.res.J[:self.n_bdot, :].copy()
 
         return self.res
-    
+    # here the feet name is the one which is defined in the json file now
     def ComputeJacobianFeet(self,q0,feet_name,local_or_global):
-        frame_name = self.feet_frame_2_standard_name[feet_name]
+        frame_name = self.feet_id[feet_name]
         id = self.pin_model.getFrameId(frame_name)
         # empty struct to return 
         # reorder from external to pinocchio
@@ -347,6 +344,7 @@ class PinWrapper():
             self.res.J_q = self.res.J[:, :self.n_bdot].copy()
 
         return self.res
+    # here q0 and v0 are the full state of the robot meaning if it is a floating base i need to provide that too
     def KinematicIntegration(self,q0,v0,dt):
         # reorder from external to pinocchio
         q0_ = self.ReoderJoints2PinVec(q0,"pos")
