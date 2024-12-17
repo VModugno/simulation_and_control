@@ -350,50 +350,56 @@ class SimRobot():
     #                 pybullet_client.enableJointForceTorqueSensor(self.bot_pybullet, id, True) 
 
     def _BuildFeetJointIDAndForceSensors(self, pybullet_client, index):
-        # Initialize dictionaries
+
+         # Initialize dictionaries
         self.foot_link_ids = {}
         self.foot_link_sensors_ids = {}
 
-        # Check if foot force sensors are enabled
-        enable_sensors = self.conf['robot_pybullet']['enable_feet_joint_force_sensors'][index]
-        if not enable_sensors:
-            return  # Sensors are not enabled, exit the function
+        # if self.conf['sim']['feet'][index] is non existent or empty, return 
+        if 'feet' not in self.conf['sim'] or not self.conf['sim']['feet'][index]:
+            print("No feet defined for robot index " + str(index))
+            return
+        else:
+            # Check if foot force sensors are enabled
+            enable_sensors = self.conf['robot_pybullet']['enable_feet_joint_force_sensors'][index]
+            if not enable_sensors:
+                return  # Sensors are not enabled, exit the function
 
-        # Get the list of feet
-        feet_list = self.conf['sim']['feet'][index]  # Assuming 'feet' is a list and 'index' corresponds to the robot
+            # Get the list of feet
+            feet_list = self.conf['sim']['feet'][index]  # Assuming 'feet' is a list and 'index' corresponds to the robot
 
-        # Loop over each foot
-        for foot in feet_list:
-            foot_name = foot['name']
-            sensor_frame = foot['sensor_frame']
-            contact_link_name = foot['contact_link_name']
+            # Loop over each foot
+            for foot in feet_list:
+                foot_name = foot['name']
+                sensor_frame = foot['sensor_frame']
+                contact_link_name = foot['contact_link_name']
 
-            # Find the joint ID for the sensor frame
-            sensor_joint_id = None
-            for _id in range(pybullet_client.getNumJoints(self.bot_pybullet)):
-                joint_info = pybullet_client.getJointInfo(self.bot_pybullet, _id)
-                joint_name = joint_info[1].decode("utf-8")
-                if joint_name == sensor_frame:
-                    sensor_joint_id = _id
-                    break
-            if sensor_joint_id is None:
-                raise ValueError(f"Sensor frame '{sensor_frame}' not found for foot '{foot_name}'.")
-            self.foot_link_sensors_ids[foot_name] = sensor_joint_id
+                # Find the joint ID for the sensor frame
+                sensor_joint_id = None
+                for _id in range(pybullet_client.getNumJoints(self.bot_pybullet)):
+                    joint_info = pybullet_client.getJointInfo(self.bot_pybullet, _id)
+                    joint_name = joint_info[1].decode("utf-8")
+                    if joint_name == sensor_frame:
+                        sensor_joint_id = _id
+                        break
+                if sensor_joint_id is None:
+                    raise ValueError(f"Sensor frame '{sensor_frame}' not found for foot '{foot_name}'.")
+                self.foot_link_sensors_ids[foot_name] = sensor_joint_id
 
-            # Enable the joint force torque sensor for this joint
-            pybullet_client.enableJointForceTorqueSensor(self.bot_pybullet, sensor_joint_id, True)
+                # Enable the joint force torque sensor for this joint
+                pybullet_client.enableJointForceTorqueSensor(self.bot_pybullet, sensor_joint_id, True)
 
-            # Find the link ID for the contact link
-            link_id = None
-            for _id in range(pybullet_client.getNumJoints(self.bot_pybullet)):
-                joint_info = pybullet_client.getJointInfo(self.bot_pybullet, _id)
-                link_name = joint_info[12].decode('UTF-8')  # Link name
-                if link_name == contact_link_name:
-                    link_id = _id
-                    break
-            if link_id is None:
-                raise ValueError(f"Contact link '{contact_link_name}' not found for foot '{foot_name}'.")
-            self.foot_link_ids[contact_link_name] = link_id
+                # Find the link ID for the contact link
+                link_id = None
+                for _id in range(pybullet_client.getNumJoints(self.bot_pybullet)):
+                    joint_info = pybullet_client.getJointInfo(self.bot_pybullet, _id)
+                    link_name = joint_info[12].decode('UTF-8')  # Link name
+                    if link_name == contact_link_name:
+                        link_id = _id
+                        break
+                if link_id is None:
+                    raise ValueError(f"Contact link '{contact_link_name}' not found for foot '{foot_name}'.")
+                self.foot_link_ids[contact_link_name] = link_id
 
     def _buildLinkNameToId(self,pybullet_client):
         num_joints = pybullet_client.getNumJoints(self.bot_pybullet)

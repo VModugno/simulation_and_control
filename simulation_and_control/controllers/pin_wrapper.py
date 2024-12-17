@@ -147,20 +147,22 @@ class PinWrapper():
         # build the dictionary of feet id and the feet reference frame to standard name
         # Initialize the dictionary mapping foot names to frame IDs
         self.feet_id = {}
+        if 'feet' not in self.conf['sim'] or not self.conf['sim']['feet'][index]:
+            print("No feet specified in the configuration file.")
+        else:
+            # Get the list of feet from the configuration
+            feet_list = self.conf['sim']['feet'][index]
 
-        # Get the list of feet from the configuration
-        feet_list = self.conf['sim']['feet'][index]
+            # Iterate over each foot in the configuration
+            for foot in feet_list:
+                foot_name = foot['name']
+                contact_link_name = foot['contact_link_name']
 
-        # Iterate over each foot in the configuration
-        for foot in feet_list:
-            foot_name = foot['name']
-            contact_link_name = foot['contact_link_name']
+                # Get the frame ID from the Pinocchio model
+                frame_id = self.pin_model.getFrameId(contact_link_name)
 
-            # Get the frame ID from the Pinocchio model
-            frame_id = self.pin_model.getFrameId(contact_link_name)
-
-            # Store the mapping from foot name to frame ID
-            self.feet_id[foot_name] = frame_id
+                # Store the mapping from foot name to frame ID
+                self.feet_id[foot_name] = frame_id
                     
         # adding mechanism to convert the joint state from the robot to the pinocchio model    
         if self.conf['robot_pin']['joint_state_conversion_active'][index]:
