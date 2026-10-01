@@ -531,12 +531,11 @@ class SimInterface():
     ## load env function ----------------------------------------------------------------------------
     # here the assumption is that the script already is written in  way that is accesing self.pybullet_client
     def LoadEnv(self, env_script_name):
-        # Open the file in read mode ('r')
+        # exec the whole script in one shared namespace: variables defined on one
+        # line (e.g. cube_size) must stay visible to the following lines
         with open(env_script_name, 'r') as file:
-            # Iterate through each line in the file
-            for line in file:
-                print("cur_line= ",line)
-                exec(line.strip())
+            script_source = file.read()
+        exec(compile(script_source, env_script_name, 'exec'), {"self": self})
 
     ## simulation functions -------------------------------------------------------------------------
     # reading data from the simulator
