@@ -328,8 +328,7 @@ class PinWrapper():
         return self.res
     # here the feet name is the one which is defined in the json file now
     def ComputeJacobianFeet(self,q0,feet_name,local_or_global):
-        frame_name = self.feet_id[feet_name]
-        id = self.pin_model.getFrameId(frame_name)
+        id = self.feet_id[feet_name]
         # empty struct to return 
         # reorder from external to pinocchio
         q0_ = self.ReoderJoints2PinVec(q0,"pos")
@@ -362,6 +361,17 @@ class PinWrapper():
         pin.forwardKinematics(self.pin_model, self.pin_data, q_)
         pin.updateFramePlacements(self.pin_model, self.pin_data)
         return self.pin_data.oMf[id].translation, self.pin_data.oMf[id].rotation
+
+    def ComputeCoMPosition(self,q):
+        q_ = self.ReoderJoints2PinVec(q,"pos")
+        pin.centerOfMass(self.pin_model, self.pin_data, q_)
+        return self.pin_data.com[0].copy()
+
+    def ComputeCoMVelocity(self,q,qdot):
+        q_ = self.ReoderJoints2PinVec(q,"pos")
+        qdot_ = self.ReoderJoints2PinVec(qdot,"vel")
+        pin.centerOfMass(self.pin_model, self.pin_data, q_, qdot_)
+        return self.pin_data.vcom[0].copy()
     
     #TODO add this functions to the pin wrapper
     # def GetHipPositionsInBaseFrame(self):
@@ -589,21 +599,12 @@ class PinWrapper():
         xdotdot_ = self.ReoderJoints2PinVec(xdotdot,"vel")
 
         tau_contact = np.zeros((self.pin_model.nv,))
-        for foot_name, ext_force  in enumerate(feet_contact_map):
+        for foot_name, ext_force in feet_contact_map.items():
             # here i need to pass the non reordere state to ComputeJacobianFeet because i will reorder it inside the function
             res = self.ComputeJacobianFeet(x,foot_name,local_or_global)
-            cur_contact_jacobian =res.J[:3,:].T.copy()
-            if foot_name == "FL":
-                cur_contact_torques = np.dot(cur_contact_jacobian,ext_force)
-            elif foot_name == "FR":
-                cur_contact_torques = np.dot(cur_contact_jacobian,ext_force)
-            elif foot_name == "RL":
-                cur_contact_torques = np.dot(cur_contact_jacobian,ext_force)
-            elif foot_name == "RR":
-                cur_contact_torques = np.dot(cur_contact_jacobian,ext_force)
-     
+            cur_contact_jacobian = res.J[:3,:].T.copy()
+            cur_contact_torques = np.dot(cur_contact_jacobian,ext_force)
             tau_contact = tau_contact + cur_contact_torques
-
 
         pin.rnea(self.pin_model, self.pin_data, x_, xdot_, xdotdot_)
         tau_FL = self.pin_data.tau.copy()
