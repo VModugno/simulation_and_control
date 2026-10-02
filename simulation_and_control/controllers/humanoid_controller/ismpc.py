@@ -1,7 +1,7 @@
 import numpy as np
-import casadi as cs
-import time
-import matplotlib.pyplot as plt
+
+from .utils import QPSolver
+
 
 class Ismpc:
   def __init__(self, initial, footstep_planner, params):
@@ -9,7 +9,6 @@ class Ismpc:
     self.N = params['N']
     N = self.N
     self.delta = params['world_time_step']
-    delta = self.delta
     self.h = params['h']
     self.eta = params['eta']
     self.foot_size = params['foot_size']
@@ -23,68 +22,141 @@ class Ismpc:
     self.A_lip = np.array([[0, 1, 0], [self.eta**2, 0, -self.eta**2], [0, 0, 0]])
     self.B_lip = np.array([[0], [0], [1]])
 
-    # dynamics
-    self.f = lambda x, u: cs.vertcat(
-      self.A_lip @ x[:3] + self.B_lip @ u[0],
-      self.A_lip @ x[3:] + self.B_lip @ u[1]
-    )
+    # flattened qp variables: X (6 x (N+1)) row-major, then U (2 x N) row-major
+    self.n_vars = 6 * (N + 1) + 2 * N
+    self.n_eq = 6 * N + 6 + 2  # dynamics + initial state + periodic tail stability
+    self.n_ineq = 4 * N        # zmp box constraints on both axes
+    self.qp = QPSolver(self.n_vars, self.n_eq, self.n_ineq)
 
-    # optimization problem
-    self.opt = cs.Opti('conic')
-    p_opts = {"expand": True}
-    s_opts = {"max_iter": 1000, "verbose": False}
-    self.opt.solver("osqp", p_opts, s_opts)
-
-    self.U = self.opt.variable(2, N)
-    self.X = self.opt.variable(6, N + 1)
-
-    self.x0_param = self.opt.parameter(6)
-    self.zmp_x_mid_param = self.opt.parameter(N)
-    self.zmp_y_mid_param = self.opt.parameter(N)
-
-    for i in range(N):
-      self.opt.subject_to(self.X[:, i + 1] == self.X[:, i] + delta * self.f(self.X[:, i], self.U[:, i]))
-
-    cost = cs.sumsqr(self.U[0, :]) + cs.sumsqr(self.U[1, :]) + \
-           100 * cs.sumsqr(self.X[2, 1:].T - self.zmp_x_mid_param) + \
-           100 * cs.sumsqr(self.X[5, 1:].T - self.zmp_y_mid_param)
-
-    self.opt.subject_to(self.X[2, 1:].T <= self.zmp_x_mid_param + self.foot_size / 2.)
-    self.opt.subject_to(self.X[2, 1:].T >= self.zmp_x_mid_param - self.foot_size / 2.)
-    self.opt.subject_to(self.X[5, 1:].T <= self.zmp_y_mid_param + self.foot_size / 2.)
-    self.opt.subject_to(self.X[5, 1:].T >= self.zmp_y_mid_param - self.foot_size / 2.)
-
-    self.opt.subject_to(self.X[:, 0] == self.x0_param)
-
-    # stability constraint with periodic tail
-    self.opt.subject_to(self.X[1, 0] + self.eta**3 * (self.X[0, 0] - self.X[2, 0]) == \
-                        self.X[1, N] + self.eta**3 * (self.X[0, N] - self.X[2, N]))
-    self.opt.subject_to(self.X[4, 0] + self.eta**3 * (self.X[3, 0] - self.X[5, 0]) == \
-                        self.X[4, N] + self.eta**3 * (self.X[3, N] - self.X[5, N]))
-
-    self.opt.minimize(cost)
+    self.H = self._build_cost_matrix()
+    self.A_eq = self._build_dynamics_matrix()
+    self.A_ineq = self._build_zmp_box_matrix()
+    self.b_eq = np.zeros(self.n_eq)
+    self.b_ineq = np.zeros(self.n_ineq)
 
     self.x = np.zeros(6)
     self.lip_state = {'com': {'pos': np.zeros(3), 'vel': np.zeros(3), 'acc': np.zeros(3)},
                       'zmp': {'pos': np.zeros(3), 'vel': np.zeros(3)}}
 
+  def _idx_x(self, j, i):
+    return j * (self.N + 1) + i
+
+  def _idx_u(self, a, i):
+    return 6 * (self.N + 1) + a * self.N + i
+
+  def _build_cost_matrix(self):
+    N = self.N
+    H = np.zeros((self.n_vars, self.n_vars))
+    for a in range(2):
+      for i in range(N):
+        H[self._idx_u(a, i), self._idx_u(a, i)] = 2.  # sumsqr(u)
+    for i in range(1, N + 1):
+      H[self._idx_x(2, i), self._idx_x(2, i)] = 200.  # 100 * sumsqr(zmp_x - mc_x)
+      H[self._idx_x(5, i), self._idx_x(5, i)] = 200.  # 100 * sumsqr(zmp_y - mc_y)
+    return H
+
+  def _build_dynamics_matrix(self):
+    N = self.N
+    delta = self.delta
+    eta2 = self.eta ** 2
+    A = np.zeros((self.n_eq, self.n_vars))
+
+    row = 0
+    for i in range(N):
+      # x axis
+      A[row, self._idx_x(0, i + 1)] = 1.
+      A[row, self._idx_x(0, i)] -= 1.
+      A[row, self._idx_x(1, i)] -= delta
+      row += 1
+      A[row, self._idx_x(1, i + 1)] = 1.
+      A[row, self._idx_x(1, i)] -= 1.
+      A[row, self._idx_x(0, i)] -= delta * eta2
+      A[row, self._idx_x(2, i)] += delta * eta2
+      row += 1
+      A[row, self._idx_x(2, i + 1)] = 1.
+      A[row, self._idx_x(2, i)] -= 1.
+      A[row, self._idx_u(0, i)] -= delta
+      row += 1
+      # y axis
+      A[row, self._idx_x(3, i + 1)] = 1.
+      A[row, self._idx_x(3, i)] -= 1.
+      A[row, self._idx_x(4, i)] -= delta
+      row += 1
+      A[row, self._idx_x(4, i + 1)] = 1.
+      A[row, self._idx_x(4, i)] -= 1.
+      A[row, self._idx_x(3, i)] -= delta * eta2
+      A[row, self._idx_x(5, i)] += delta * eta2
+      row += 1
+      A[row, self._idx_x(5, i + 1)] = 1.
+      A[row, self._idx_x(5, i)] -= 1.
+      A[row, self._idx_u(1, i)] -= delta
+      row += 1
+
+    for j in range(6):
+      A[row, self._idx_x(j, 0)] = 1.
+      row += 1
+
+    eta3 = self.eta ** 3
+    A[row, self._idx_x(1, 0)] = 1.
+    A[row, self._idx_x(0, 0)] = eta3
+    A[row, self._idx_x(2, 0)] -= eta3
+    A[row, self._idx_x(1, N)] -= 1.
+    A[row, self._idx_x(0, N)] -= eta3
+    A[row, self._idx_x(2, N)] += eta3
+    row += 1
+    A[row, self._idx_x(4, 0)] = 1.
+    A[row, self._idx_x(3, 0)] = eta3
+    A[row, self._idx_x(5, 0)] -= eta3
+    A[row, self._idx_x(4, N)] -= 1.
+    A[row, self._idx_x(3, N)] -= eta3
+    A[row, self._idx_x(5, N)] += eta3
+    row += 1
+    return A
+
+  def _build_zmp_box_matrix(self):
+    N = self.N
+    A = np.zeros((self.n_ineq, self.n_vars))
+    row = 0
+    for i in range(1, N + 1):
+      A[row, self._idx_x(2, i)] = 1.
+      row += 1
+      A[row, self._idx_x(2, i)] = -1.
+      row += 1
+      A[row, self._idx_x(5, i)] = 1.
+      row += 1
+      A[row, self._idx_x(5, i)] = -1.
+      row += 1
+    return A
+
   def solve(self, current, t):
     self.x = np.array([current['com']['pos'][0], current['com']['vel'][0], current['zmp']['pos'][0],
                        current['com']['pos'][1], current['com']['vel'][1], current['zmp']['pos'][1]])
-    
+
     mc_x, mc_y = self.generate_moving_constraint(t)
+    N = self.N
+    half = self.foot_size / 2.
 
-    # solve optimization problem
-    self.opt.set_value(self.x0_param, self.x)
-    self.opt.set_value(self.zmp_x_mid_param, mc_x)
-    self.opt.set_value(self.zmp_y_mid_param, mc_y)
+    F = np.zeros(self.n_vars)
+    for i in range(1, N + 1):
+      F[self._idx_x(2, i)] = -200. * mc_x[i - 1]
+      F[self._idx_x(5, i)] = -200. * mc_y[i - 1]
 
-    sol = self.opt.solve()
-    self.x = sol.value(self.X[:,1])
-    self.u = sol.value(self.U[:,0])
+    self.b_eq[6 * N:6 * N + 6] = self.x
 
-    self.opt.set_initial(self.U, sol.value(self.U))
-    self.opt.set_initial(self.X, sol.value(self.X))
+    row = 0
+    for i in range(1, N + 1):
+      self.b_ineq[row] = mc_x[i - 1] + half
+      row += 1
+      self.b_ineq[row] = half - mc_x[i - 1]
+      row += 1
+      self.b_ineq[row] = mc_y[i - 1] + half
+      row += 1
+      self.b_ineq[row] = half - mc_y[i - 1]
+      row += 1
+
+    z = self.qp_solve(F)
+    self.x = np.array([z[self._idx_x(j, 1)] for j in range(6)])
+    self.u = np.array([z[self._idx_u(0, 0)], z[self._idx_u(1, 0)]])
 
     # create output LIP state
     self.lip_state['com']['pos'] = np.array([self.x[0], self.x[3], self.h])
@@ -98,6 +170,10 @@ class Ismpc:
       contact += self.footstep_planner.footstep_plan[self.footstep_planner.get_step_index_at_time(t)]['foot_id']
 
     return self.lip_state, contact
+
+  def qp_solve(self, F):
+    self.qp.set_values(self.H, F, self.A_eq, self.b_eq, self.A_ineq, self.b_ineq)
+    return self.qp.solve()
 
   def generate_moving_constraint_at_time(self, time):
     step_index = self.footstep_planner.get_step_index_at_time(time)
@@ -113,10 +189,10 @@ class Ismpc:
     if step_index == 0: start_pos = (self.initial['lsole']['pos'][3:] + self.initial['rsole']['pos'][3:]) / 2.
     else:               start_pos = np.array(self.footstep_plan[step_index]['pos'])
     target_pos = np.array(self.footstep_plan[step_index + 1]['pos'])
-    
+
     moving_constraint = start_pos + (target_pos - start_pos) * ((time_in_step - single_support_duration) / double_support_duration)
     return moving_constraint
-  
+
   def generate_moving_constraint(self, t):
     mc_x = np.full(self.N, (self.initial['lsole']['pos'][3] + self.initial['rsole']['pos'][3]) / 2.)
     mc_y = np.full(self.N, (self.initial['lsole']['pos'][4] + self.initial['rsole']['pos'][4]) / 2.)
