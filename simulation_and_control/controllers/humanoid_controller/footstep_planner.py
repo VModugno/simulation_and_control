@@ -1,5 +1,5 @@
 import numpy as np
-from utils import *
+from .utils import *
 
 class FootstepPlanner:
     def __init__(self, vref, initial_lfoot, initial_rfoot, params):
