@@ -574,8 +574,8 @@ class SimInterface():
                 self.bot[j].prev_base_position = self.bot[j].link_floating_base_pos
                 self.bot[j].prev_base_orientation = self.bot[j].link_floating_base_ori
                 if self.bot[j].conf['robot_pybullet']['init_link_base_vel'] and self.bot[j].conf['robot_pybullet']['init_link_base_ang_vel']:
-                    self.bot[j].prev_base_lin_vel = self.bot[j].conf['robot_pybullet']['init_link_base_vel']
-                    self.bot[j].prev_base_ang_vel = self.bot[j].conf['robot_pybullet']['init_link_base_ang_vel']
+                    self.bot[j].prev_base_lin_vel = self.bot[j].conf['robot_pybullet']['init_link_base_vel'][j]
+                    self.bot[j].prev_base_ang_vel = self.bot[j].conf['robot_pybullet']['init_link_base_ang_vel'][j]
                 # prev base velocities in base frame
                 #self.bot[j].prev_base_lin_vel_base_frame = self.GetBaseLinVelocityBodyFrame(j)
                 #self.bot[j].prev_base_ang_vel_base_frame = self.GetBaseAngVelocityBodyFrame(j)
@@ -757,7 +757,7 @@ class SimInterface():
             if(self.bot[j].base_type=="floating"):
                 # setting initil com velocity of the robot (if specified in the config file)
                 if self.bot[j].conf['robot_pybullet']['init_link_base_vel'] and self.bot[j].conf['robot_pybullet']['init_link_base_ang_vel']:
-                    self.pybullet_client.resetBaseVelocity(self.bot[j].bot_pybullet, self.bot[j].conf['robot_pybullet']['init_link_base_vel'], self.bot[j].conf['robot_pybullet']['init_link_base_ang_vel'])
+                    self.pybullet_client.resetBaseVelocity(self.bot[j].bot_pybullet, self.bot[j].conf['robot_pybullet']['init_link_base_vel'][j], self.bot[j].conf['robot_pybullet']['init_link_base_ang_vel'][j])
                     #self.bot.prev_base_pos_vel = self.bot.conf['robot_pybullet']['init_link_base_vel']
                     #self.bot.prev_base_pos_ang_vel = self.bot.conf['robot_pybullet']['init_link_base_ang_vel']
                 else:
