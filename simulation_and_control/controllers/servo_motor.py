@@ -255,10 +255,8 @@ class ServoMotorModel(object):
             mode = motor_commands.control_list[i]
             
             if mode == "torque":
-                # Ensure that tau_cmd is available and has the correct length
-               
-                # Compute motor torque directly
-                motor_torque = self._strength_ratios[i] * motor_commands.ctrl_cmd[i] + additional_torques[i] 
+                # ctrl_cmd is 1-D for all-torque commands, 2-D when mixed with position interfaces
+                motor_torque = self._strength_ratios[i] * np.ravel(motor_commands.ctrl_cmd[i])[0] + additional_torques[i]
                 motor_torques[i] = motor_torque
                 
             elif mode == "position":
@@ -276,8 +274,7 @@ class ServoMotorModel(object):
                 motor_torques[i] = motor_torque
                 
             elif mode == "velocity":
-                # Retrieve desired angle and velocity for the motor
-                desired_motor_velocity = motor_commands.ctrl_cmd[i]
+                desired_motor_velocity = np.ravel(motor_commands.ctrl_cmd[i])[0]
                 
                 # Retrieve kp and kd (can be scalar or array)
                 kd = self._kd[i] if hasattr(self._kd, '__iter__') else self._kd
