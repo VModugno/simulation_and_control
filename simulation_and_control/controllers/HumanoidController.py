@@ -1,22 +1,83 @@
-import numpy as np
-import pin_wrapper as dyn_model
-import copy
-from utils import *
-import os
-import humanoid_controller.ismpc as ismpc
-import humanoid_controller.footstep_planner as footstep_planner
-import humanoid_controller.inverse_dynamics as id
-import humanoid_controller.filter as filter
-import humanoid_controller.foot_trajectory_generator as ftg
+"""HRP-4 whole-body walking controller (IS-MPC + QP inverse dynamics), pinocchio port.
 
-from humanoid_controller.logger import Logger
-from scipy.spatial.transform import Rotation as R  # For quaternion to rotation vector conversion
+Port of the DART IS-MPC demo to the RoboEnv pinocchio/pybullet stack.
+
+Key differences from the original demo (and from the previous broken skeleton):
+
+- pybullet base pose/velocity getters return the INERTIAL frame: retrieve_state()
+  converts to the LINK frame (T_link = T_inertial * T_li^-1) and rotates the base
+  velocity to the pin free-flyer LOCAL convention (see probe-verified formulas).
+- The Kalman filter (demo simulation.py) IS ported: it runs before every
+  mpc.solve on the com/zmp xy state, because the raw pybullet ZMP is noisy
+  (sole-edge rocking, +-30% fz spikes) and feeding it unfiltered into the
+  unstable LIP dynamics diverged laterally during in-place stepping (see the
+  MS1 debug notes in NEXT_STEPS.md). The CoM position/velocity alone are
+  exact from pinocchio; only the ZMP feedback needed the filter.
+- The ZMP is aggregated from world-frame pybullet contact points (the joint
+  reaction forces are unreliable while airborne). The tangential friction term
+  of the demo formula is dropped: it scales with (zmp_z - point_z) ~ 0 on flat
+  ground. When the total normal force is negligible the previous ZMP is held
+  instead of resetting to zero (fixes the demo FIXME). On the very first
+  retrieve_state (constructor, before any pybullet step) there are no contact
+  points yet, so the ZMP is seeded with the CoM projection: at rest ZMP = CoM
+  xy. A zero seed would make the MPC see a fake 3.5 cm offset and push the
+  robot forward until the QP turned infeasible.
+- The desired com height is pinned to the INITIAL measured com z (0.761 m)
+  instead of the LIP constant h = 0.72 m: commanding 0.72 against an actual
+  0.761 would pull the whole body down through the QP all the time.
+- A guard holds the previous torque if the MPC solution explodes (|lip|>100):
+  the osqp fallback can return huge-but-finite garbage instead of raising when
+  it hits max_iter, which would otherwise flow straight into the references.
+- The pinocchio joint order differs from the motor (ext) order:
+  ext = [R_HIP_Y ... L_ELBOW_P], pin = [CHEST_P, CHEST_Y, L_SHOULDER_*, ...].
+  inverse_dynamics pads current['joint'] raw into pin nv[6:], so the joint task
+  vectors must be passed PIN-ORDERED (ReoderJoints2PinVec slices).
+- The MPC tick (params['world_time_step'] = 0.01 s, 100 Hz) is intentionally
+  slower than the simulation step (0.001 s, 1 kHz): the test loop re-applies the
+  last torque command at every simulation step.
+- t_max caps the tick at (start of the last planned step - 1) instead of the
+  demo's horizon safety margin: freezing earlier left the final step half
+  prepared and the robot tipped over the stance toe while the ZMP reference
+  kept advancing inside the frozen horizon (probe-verified).
+
+Control flow per 100 Hz tick (mirrors the demo customPreStep):
+  retrieve_state -> mpc.solve -> desired com/zmp -> foot trajectories ->
+  torso/base orientation reference -> ID-QP torques -> clip +-100 N*m.
+"""
+
+import copy
+
+import numpy as np
 import pinocchio as pin
+from scipy.linalg import block_diag
+
+from .humanoid_controller.ismpc import Ismpc
+from .humanoid_controller.footstep_planner import FootstepPlanner
+from .humanoid_controller.foot_trajectory_generator import FootTrajectoryGenerator
+from .humanoid_controller.inverse_dynamics import InverseDynamics
+from .humanoid_controller.logger import Logger
+from .humanoid_controller.filter import KalmanFilter
+
 
 class Hrp4Controller:
-    def __init__(self,dyn_model,sim):
-        
-        self.time = 0
+
+    def __init__(self, dyn_model, sim, vref=None, use_gui=False):
+        """
+        Args:
+            dyn_model: PinWrapper of the floating-base hrp4 model.
+            sim: pybullet SimInterface (single robot).
+            vref: gait reference, list of (vx, vy, wtheta) tuples, one per step.
+                  Defaults to the walk gait of the IS-MPC demo.
+            use_gui: enable the live desired/current CoM-ZMP logger plot.
+        """
+        self.sim = sim
+        self.dyn_model = dyn_model
+        self.pybullet_client = sim.GetPyBulletClient()
+        self.robot_id = sim.bot[0].bot_pybullet
+        self.use_gui = use_gui
+
+        # --- parameters (IS-MPC demo values) ---
+        # world_time_step is the 100 Hz CONTROL tick, NOT the 1 kHz sim step.
         self.params = {
             'g': 9.81,
             'h': 0.72,
@@ -24,287 +85,319 @@ class Hrp4Controller:
             'step_height': 0.02,
             'ss_duration': 70,
             'ds_duration': 30,
-            'world_time_step': dyn_model.getTimeStep(),
+            'world_time_step': 0.01,
             'first_swing': 'right',
-            'µ': 0.5,
+            'mu': 0.5,
             'N': 100,
-            'dof':dyn_model.getNumberofActuatedJoints(),
+            'dof': dyn_model.getNumberofActuatedJoints(),
         }
         self.params['eta'] = np.sqrt(self.params['g'] / self.params['h'])
+        self.mass = pin.computeTotalMass(dyn_model.pin_model)
+        self.n_joints = self.params['dof']
+        self.prev_zmp = np.zeros(3)
 
-        self.dyn_model = dyn_model
-        init_motor_angles = sim.GetMotorAngles(0)
-        init_robot_pos = sim.GetBasePosition()
-        init_robot_ori = sim.GetBaseOrientation()
-        init_q = np.array([init_robot_pos, init_robot_ori, init_motor_angles])
-        left_foot_link_name = dyn_model.GetLinkName('FL')
-        left_foot_pos,_ = dyn_model.ComputeFK(init_q,left_foot_link_name)
-        right_foot_link_name = dyn_model.GetLinkName('FR')
-        right_foot_pos,_ = dyn_model.ComputeFK(init_q,right_foot_link_name)
-        # robot links
-        #self.lsole = hrp4.getBodyNode('l_sole')
-        #self.rsole = hrp4.getBodyNode('r_sole')
-        #self.torso = hrp4.getBodyNode('torso')
-        #self.base  = hrp4.getBodyNode('body')
-
-       
-
-        # initialize state
+        # --- state ---
+        self.time = 0  # control tick (100 Hz), not simulation steps
         self.initial = self.retrieve_state()
-        self.contact = 'lsole' if self.params['first_swing'] == 'right' else 'rsole' # there is a dummy footstep
+        self.current = copy.deepcopy(self.initial)
         self.desired = copy.deepcopy(self.initial)
+        # support foot passed to the ID during the initial double support
+        self.contact = 'lsole' if self.params['first_swing'] == 'right' else 'rsole'
+        self.prev_zmp = np.array(self.initial['zmp']['pos'])
 
-        # selection matrix for redundant dofs
-        redundant_dofs = [ \
-            "NECK_Y", "NECK_P", \
-            "R_SHOULDER_P", "R_SHOULDER_R", "R_SHOULDER_Y", "R_ELBOW_P", \
-            "L_SHOULDER_P", "L_SHOULDER_R", "L_SHOULDER_Y", "L_ELBOW_P"]
-        
-        # initialize inverse dynamics
-        self.id = id.InverseDynamics(self.hrp4, redundant_dofs)
+        # The LIP height h is a model constant, but the robot crouches lower
+        # than the nominal h = 0.72 m. A constant 4 cm CoM-height error gives
+        # the com task a steady downward pull that compounds the ZMP noise.
+        self.com_height = np.array(self.initial['com']['pos'])[2]
 
-        # initialize footstep planner
-        reference = [(0.1, 0., 0.2)] * 5 + [(0.1, 0., -0.1)] * 10 + [(0.1, 0., 0.)] * 10
-        self.footstep_planner = footstep_planner.FootstepPlanner(
-            reference,
-            left_foot_pos,
-            right_foot_pos,
-            self.params
-            )
+        # --- whole-body inverse dynamics QP ---
+        redundant_dofs = [
+            "NECK_Y", "NECK_P",
+            "R_SHOULDER_P", "R_SHOULDER_R", "R_SHOULDER_Y", "R_ELBOW_P",
+            "L_SHOULDER_P", "L_SHOULDER_R", "L_SHOULDER_Y", "L_ELBOW_P",
+        ]
+        self.id = InverseDynamics(
+            dyn_model, redundant_dofs,
+            foot_size=self.params['foot_size'], mu=self.params['mu'])
 
-        # initialize MPC controller
-        self.mpc = ismpc.Ismpc(
-            self.initial, 
-            self.footstep_planner, 
-            self.params
-            )
+        # --- gait reference ---
+        if vref is None:
+            vref = [(0.1, 0., 0.2)] * 5 + [(0.1, 0., -0.1)] * 10 + [(0.1, 0., 0.)] * 10
 
-        # initialize foot trajectory generator
-        self.foot_trajectory_generator = ftg.FootTrajectoryGenerator(
-            self.initial, 
-            self.footstep_planner, 
-            self.params
-            )
+        # footstep planner wants the initial 6d sole poses [rotvec, position]
+        self.footstep_planner = FootstepPlanner(
+            vref,
+            self.initial['lsole']['pos'],
+            self.initial['rsole']['pos'],
+            self.params)
 
-        # initialize kalman filter
+        self.mpc = Ismpc(self.initial, self.footstep_planner, self.params)
+
+        self.foot_trajectory_generator = FootTrajectoryGenerator(
+            self.initial, self.footstep_planner, self.params)
+
+        # plan[last] is only the LANDING TARGET of the final swing: step `last`
+        # itself would interpolate toward plan[last+1], which does not exist
+        # (IndexError in the trajectory generator). The walk therefore ends when
+        # the last step STARTS: get_start_time(last) is the first tick of that
+        # phantom step, so freeze one tick earlier, in the double support that
+        # follows the final swing. There the feet are planted at their final
+        # poses and the MPC moving constraint saturates at the final footstep
+        # (sigma clips to 1 past its window), i.e. the robot simply stands.
+        # Freezing one step earlier (start(last) - N) leaves the ZMP reference
+        # still advancing inside the frozen horizon while the feet are pinned
+        # behind it: the robot tips forward over the stance toe and never lands
+        # the final step (probe-verified failure mode).
+        last = len(self.footstep_planner.footstep_plan) - 1
+        self.t_max = self.footstep_planner.get_start_time(last) - 1
+
+        # --- Kalman filter on the LIP state (demo wiring) ---
+        # x = [com_x, vel_x, zmp_x, com_y, vel_y, zmp_y]; the predict uses the
+        # previous MPC zmp rate, the update fuses the exact pinocchio CoM with
+        # the noisy contact-based ZMP measurement.
         A = np.identity(3) + self.params['world_time_step'] * self.mpc.A_lip
         B = self.params['world_time_step'] * self.mpc.B_lip
         H = np.identity(3)
         Q = block_diag(1., 1., 1.)
         R = block_diag(1e1, 1e2, 1e4)
         P = np.identity(3)
-        x = np.array([self.initial['com']['pos'][0], self.initial['com']['vel'][0], self.initial['zmp']['pos'][0], \
-                      self.initial['com']['pos'][1], self.initial['com']['vel'][1], self.initial['zmp']['pos'][1]])
-        self.kf = filter.KalmanFilter(block_diag(A, A), \
-                                      block_diag(B, B), \
-                                      block_diag(H, H), \
-                                      block_diag(Q, Q), \
-                                      block_diag(R, R), \
-                                      block_diag(P, P), \
-                                      x)
+        x0 = np.array([self.initial['com']['pos'][0], self.initial['com']['vel'][0], self.initial['zmp']['pos'][0],
+                       self.initial['com']['pos'][1], self.initial['com']['vel'][1], self.initial['zmp']['pos'][1]])
+        self.kf = KalmanFilter(block_diag(A, A), block_diag(B, B), block_diag(H, H),
+                               block_diag(Q, Q), block_diag(R, R), block_diag(P, P), x0)
 
-        # initialize logger and plots
-        self.logger = Logger(self.initial)
-        self.logger.initialize_plot()
+        # --- torque command (ext/motor order) ---
+        self.n_joints = dyn_model.getNumberofActuatedJoints()
+        self.tau_cmd = np.zeros(self.n_joints)
 
+        # --- logger (the raw q/dq entries are not loggable dictionaries) ---
+        self.logger = Logger(self._loggable(self.initial))
+        if self.use_gui:
+            self.logger.initialize_plot()
 
-    def retrieve_state(self,sim):
-        
-        index = 0  # Assuming a single robot instance
-        dyn_model = self.dyn_model  # Access the dynamic model
-        
+    # ------------------------------------------------------------------ state
 
-        # Get motor angles and velocities
-        motor_angles = sim.GetMotorAngles(index)
-        motor_velocities = sim.GetMotorVelocities(index)
-        # Assuming motor accelerations are available (else need to add GetMotorAccelerations to sim)
-        motor_accelerations = sim.GetMotorAccelerationTMinusOne(index)
+    @staticmethod
+    def _loggable(state):
+        """Filter out the raw q/dq arrays: Logger expects dict-of-dicts only."""
+        return {k: v for k, v in state.items() if isinstance(v, dict)}
 
-        # Get base position and orientation
-        base_position = sim.GetBasePosition(index)  # [x, y, z]
-        base_orientation_quat = sim.GetBaseOrientation(index)  # [x, y, z, w]
+    def _base_link_state(self):
+        """pybullet reports the base INERTIAL frame; pinocchio wants the LINK frame.
 
-        # Convert base orientation quaternion to rotation vector
-        base_orientation = R.from_quat(base_orientation_quat).as_rotvec()  # [rx, ry, rz]
+        T_link = T_inertial * T_li^-1 with T_li the (constant) local inertial
+        transform. Velocity: world velocity of the inertial origin transferred to
+        the link origin, then rotated into the link frame (pin free-flyer LOCAL).
+        """
+        sim = self.sim
+        pos_i = np.array(sim.GetBasePosition(0))
+        quat_i = np.array(sim.GetBaseOrientation(0))  # x y z w
+        info = sim.getDynamicsInfo(self.robot_id, -1)
+        p_li = np.array(info[3])
+        q_li = np.array(info[4])
 
-        # Get base linear and angular velocities
-        base_lin_velocity = sim.GetBaseLinVelocity(index)  # [vx, vy, vz]
-        base_ang_velocity = sim.GetBaseAngVelocity(index)  # [wx, wy, wz]
+        R_i = pin.Quaternion(quat_i[3], quat_i[0], quat_i[1], quat_i[2]).matrix()
+        R_li = pin.Quaternion(q_li[3], q_li[0], q_li[1], q_li[2]).matrix()
+        R_link = R_i @ R_li.T
+        p_link = pos_i - R_link @ p_li
+        quat_link = pin.Quaternion(R_link).coeffs()  # x y z w
 
-        # Build the full state vectors (configuration and velocity)
-        q_base = np.concatenate([base_position, base_orientation_quat])  # Base position and orientation (quaternion)
-        dq_base = np.concatenate([base_lin_velocity, base_ang_velocity])  # Base linear and angular velocities
+        # getBaseVelocity returns the inertial-frame origin velocity, world axes
+        v_lin_i = np.array(sim.GetBaseLinVelocity(0))
+        w_world = np.array(sim.GetBaseAngVelocity(0))
+        v_lin_link_world = v_lin_i + np.cross(w_world, p_link - pos_i)
+        v_local = R_link.T @ v_lin_link_world
+        w_local = R_link.T @ w_world
 
-        # Assemble the full state vectors including joints
-        q_full = np.concatenate([q_base, motor_angles])
-        dq_full = np.concatenate([dq_base, motor_velocities])
+        return p_link, quat_link, np.concatenate([v_local, w_local])
 
-        # Initialize dictionaries to store foot states
-        foot_states = {}
-        foot_names = sim.bot[index].foot_link_ids.keys()
+    def _compute_zmp(self, com_pos, l_sole_pos, r_sole_pos):
+        """ZMP from world-frame pybullet contact points.
 
-        # For each foot, compute position and velocity using dyn_model
-        for foot_name in foot_names:
-            # Get the link name for the foot
-            foot_link_name = dyn_model.GetLinkName(foot_name)
+        The tangential friction term of the demo formula is dropped: it scales
+        with (zmp_z - contact_z) ~ 0 on flat ground. If the normal force is
+        negligible the previous ZMP is held (the demo reset it to zero, which
+        would slam the MPC state back to the origin mid-swing).
+        """
+        fz = 0.
+        zmp_xy = np.zeros(2)
+        for c in self.pybullet_client.getContactPoints(bodyA=self.robot_id):
+            if c[2] == self.robot_id:
+                continue  # self contact
+            f = c[9]  # normal force magnitude
+            p = np.array(c[5])  # contact point on the robot, world frame
+            fz += f
+            zmp_xy += p[:2] * f
 
-            # Compute forward kinematics to get foot position and orientation
-            foot_translation, foot_rotation_matrix = dyn_model.ComputeFK(q_full, foot_link_name)
-            foot_position = foot_translation  # Position in world frame
-            foot_orientation_matrix = foot_rotation_matrix  # Rotation matrix in world frame
-            foot_orientation = pin.log3(foot_orientation_matrix)  # Convert to rotation vector
-            foot_pose = np.hstack((foot_orientation, foot_position))
-
-            # Compute Jacobian to get foot velocities
-            res = dyn_model.ComputeJacobian(q_full, foot_link_name, local_or_global='global')
-            foot_jacobian = res.J  # Extract the Jacobian matrix
-
-            # Reorder dq_full to Pinocchio's expected order
-            dq_full_pin = dyn_model.ReoderJoints2PinVec(dq_full, "vel")
-
-            # Compute foot velocity
-            foot_velocity = foot_jacobian @ dq_full_pin  # Spatial velocity
-
-            # Store in the dictionary
-            foot_states[foot_name] = {
-                'pos': foot_pose,
-                'vel': foot_velocity,
-                'acc': np.zeros(6)  # Placeholder, as accelerations are not directly available
-            }
-
-        # Get torso position, orientation, and velocities using dyn_model
-        torso_link_name = 'torso'  # Adjust based on your robot's link naming
-        # Compute FK for the torso
-        torso_translation, torso_rotation_matrix = dyn_model.ComputeFK(q_full, torso_link_name)
-        torso_position = torso_translation
-        torso_orientation_matrix = torso_rotation_matrix
-        torso_orientation = pin.log3(torso_orientation_matrix)
-
-        # Compute torso velocity
-        res_torso = dyn_model.ComputeJacobian(q_full, torso_link_name, local_or_global='global')
-        torso_jacobian = res_torso.J
-
-        # Reuse dq_full_pin
-        torso_velocity = torso_jacobian @ dq_full_pin
-        torso_linear_velocity = torso_velocity[:3]
-        torso_angular_velocity = torso_velocity[3:]
-
-        # Compute Center of Mass (CoM) position and velocity using dyn_model
-        # Assuming ComputeCoMPosition and ComputeCoMVelocity internally handle reordering
-        com_position = dyn_model.ComputeCoMPosition(q_full)
-        com_velocity = dyn_model.ComputeCoMVelocity(q_full, dq_full)
-
-        # Compute ground reaction forces (GRF) at the feet
-        foot_grfs = sim.ComputeFootGRF(index)  # Returns a dictionary {foot_name: force_vector}
-
-        # Compute ZMP
-        total_force = np.zeros(3)
-        zmp_numerator = np.zeros(3)
-        for foot_name, force in foot_grfs.items():
-            foot_pos = foot_states[foot_name]['pos'][3:]  # Extract position part
-            force = np.array(force)
-            if np.linalg.norm(force) < 0.1:
-                continue  # Ignore negligible forces
-            total_force += force
-            zmp_numerator += foot_pos * force[2]
-
-        if total_force[2] > 0.1:
-            zmp = zmp_numerator / total_force[2]
+        if fz > 0.1:
+            zmp = np.array([
+                zmp_xy[0] / fz,
+                zmp_xy[1] / fz,
+                com_pos[2] - fz * self.params['h'] / (self.mass * self.params['g']),
+            ])
+        elif not np.any(self.prev_zmp):
+            # Cold start: the constructor reads the state before the first
+            # pybullet step, so no contacts exist yet and prev_zmp is still
+            # the all-zero sentinel. At rest the ZMP is the CoM projected
+            # toward the ground; seeding the hold with zeros made the MPC see
+            # a fake 3.5 cm ZMP offset that pushed the robot forward until
+            # the QP went infeasible.
+            zmp = np.array([com_pos[0], com_pos[1],
+                            com_pos[2] - self.params['h']])
         else:
-            zmp = np.zeros(3)  # Robot is in the air or not enough contact force
+            zmp = np.array(self.prev_zmp)
 
-        # Clip ZMP close to robot's feet positions
-        # Compute midpoint between feet
-        foot_positions = np.array([foot_states[foot_name]['pos'][3:] for foot_name in foot_states])
-        midpoint = np.mean(foot_positions, axis=0)
+        # clip around the feet midpoint (the demo had a midpoint typo: (l+l)/2)
+        midpoint = (l_sole_pos + r_sole_pos) / 2.
         zmp = np.clip(zmp, midpoint - 0.3, midpoint + 0.3)
+        self.prev_zmp = np.array(zmp)
+        return zmp
 
-        # Assemble the state dictionary
-        state = {
-            'lfoot': foot_states.get('FL', {'pos': np.zeros(6), 'vel': np.zeros(6), 'acc': np.zeros(6)}),
-            'rfoot': foot_states.get('FR', {'pos': np.zeros(6), 'vel': np.zeros(6), 'acc': np.zeros(6)}),
-            'com': {
-                'pos': com_position,
-                'vel': com_velocity,
-                'acc': np.zeros(3)  # Placeholder
-            },
-            'torso': {
-                'pos': torso_orientation,
-                'vel': torso_angular_velocity,
-                'acc': np.zeros(3)  # Placeholder
-            },
-            'base': {
-                'pos': base_orientation,  # Base orientation as rotation vector
-                'vel': base_ang_velocity,
-                'acc': np.zeros(3)  # Placeholder
-            },
-            'joint': {
-                'pos': q_full,
-                'vel': dq_full,
-                'acc': np.concatenate((np.zeros(6), motor_accelerations))  # Base accelerations set to zero
-            },
-            'zmp': {
-                'pos': zmp,
-                'vel': np.zeros(3),  # Placeholder
-                'acc': np.zeros(3)   # Placeholder
+    def retrieve_state(self):
+        sim = self.sim
+        dyn = self.dyn_model
+
+        # motor state (ext/motor order)
+        q_mot = np.array(sim.GetMotorAngles(0))
+        qd_mot = np.array(sim.GetMotorVelocities(0))
+
+        p_link, quat_link, base_vel = self._base_link_state()
+
+        # full state in ext convention (joint part ext-ordered; the wrapper
+        # reorders internally wherever pinocchio order is needed)
+        q_full = np.concatenate([p_link, quat_link, q_mot])        # nq = 31
+        dq_full = np.concatenate([base_vel, qd_mot])                # nv = 30
+        dq_pin = dyn.ReoderJoints2PinVec(dq_full, 'vel')
+
+        # soles: 6d pose [rotvec, position], 6d velocity [angular, linear]
+        feet = {}
+        for foot in ('lsole', 'rsole'):
+            link = dyn.getFeetLinkName(foot)
+            tr, R = dyn.ComputeFK(q_full, link)
+            dyn.ComputeJacobian(q_full, link, 'local_global')
+            vel_lwa = dyn.res.J @ dq_pin          # rows: [linear; angular]
+            feet[foot] = {
+                'pos': np.hstack([pin.log3(R), tr]),
+                'vel': vel_lwa[[3, 4, 5, 0, 1, 2]],  # dart order [angular; linear]
+                'acc': np.zeros(6),
             }
+
+        com_pos = np.array(dyn.ComputeCoMPosition(q_full))
+        com_vel = np.array(dyn.ComputeCoMVelocity(q_full, dq_full))
+
+        # torso/base: orientation-only tasks (3d rotvec + 3d world angular vel)
+        # state key 'base' maps to the pin 'body' frame (the root link of hrp4)
+        upper = {}
+        for state_key, pin_frame in (('torso', 'torso'), ('base', 'body')):
+            _, R = dyn.ComputeFK(q_full, pin_frame)
+            dyn.ComputeJacobian(q_full, pin_frame, 'local_global')
+            upper[state_key] = {
+                'pos': pin.log3(R),
+                'vel': dyn.res.J[3:6, :] @ dq_pin,
+                'acc': np.zeros(3),
+            }
+
+        # joint task vectors must be PIN-ordered: inverse_dynamics pads them raw
+        # into pin nv[6:] while the ext motor order differs from the pin order.
+        q_pin = dyn.ReoderJoints2PinVec(q_full, 'pos')
+        joint = {
+            'pos': q_pin[7:],   # nq = 7 (base) + 24 (joints)
+            'vel': dq_pin[6:],  # nv = 6 (base) + 24 (joints)
+            'acc': np.zeros(self.n_joints),
         }
 
-        return state
+        # ZMP from measured contacts (uses current soles for the clip midpoint)
+        zmp = self._compute_zmp(com_pos, feet['lsole']['pos'][3:], feet['rsole']['pos'][3:])
 
+        return {
+            'lsole': feet['lsole'],
+            'rsole': feet['rsole'],
+            'com': {'pos': com_pos, 'vel': com_vel, 'acc': np.zeros(3)},
+            'torso': upper['torso'],
+            'base': upper['base'],
+            'joint': joint,
+            'zmp': {'pos': zmp, 'vel': np.zeros(3), 'acc': np.zeros(3)},
+            # raw ext-convention state consumed by inverse_dynamics
+            'q': q_full,
+            'dq': dq_full,
+        }
 
-    def UpdateEstimatedState(self,u):
-        # update kalman filter
-         #u = np.array([self.desired['zmp']['vel'][0], self.desired['zmp']['vel'][1]])
-         self.kf.predict(u)
-         x_flt, _ = self.kf.update(np.array([self.current['com']['pos'][0], self.current['com']['vel'][0], self.current['zmp']['pos'][0], \
-                                             self.current['com']['pos'][1], self.current['com']['vel'][1], self.current['zmp']['pos'][1]]))
-        
-         # update current state
-         self.current['com']['pos'][0] = x_flt[0]
-         self.current['com']['vel'][0] = x_flt[1]
-         self.current['zmp']['pos'][0] = x_flt[2]
-         self.current['com']['pos'][1] = x_flt[3]
-         self.current['com']['vel'][1] = x_flt[4]
-         self.current['zmp']['pos'][1] = x_flt[5]
+    # --------------------------------------------------------------- control
 
-    
     def ComputeController(self):
-        #     # get references using MPC
-    #     #self.desired['com']['pos'] = np.array([0., 0., 0.75])
-    #     lip_state, contact = self.mpc.solve(self.current, self.time)
-    #     if contact == 'ds':
-    #         pass
-    #     elif contact == 'ssleft':
-    #         self.contact = 'lsole'
-    #     elif contact == 'ssright':
-    #         self.contact = 'rsole'
+        """One 100 Hz control tick: returns the torque command (ext order)."""
+        self.current = self.retrieve_state()
+        # freeze the tick before the plan tail (planner/mpc index plan[k+1])
+        t = min(self.time, self.t_max)
 
-    #     self.desired['com']['pos'] = lip_state['com']['pos']
-    #     self.desired['com']['vel'] = lip_state['com']['vel']
-    #     self.desired['com']['acc'] = lip_state['com']['acc']
-    #     self.desired['zmp']['pos'] = lip_state['zmp']['pos']
-    #     self.desired['zmp']['vel'] = lip_state['zmp']['vel']
+        # --- Kalman filter: fuse the exact pinocchio CoM with the noisy ---
+        # --- contact-based ZMP before feeding the MPC                     ---
+        u = np.array([self.desired['zmp']['vel'][0], self.desired['zmp']['vel'][1]])
+        self.kf.predict(u)
+        z = np.array([self.current['com']['pos'][0], self.current['com']['vel'][0], self.current['zmp']['pos'][0],
+                      self.current['com']['pos'][1], self.current['com']['vel'][1], self.current['zmp']['pos'][1]])
+        x_flt, _ = self.kf.update(z)
+        self.current['com']['pos'][0] = x_flt[0]
+        self.current['com']['vel'][0] = x_flt[1]
+        self.current['zmp']['pos'][0] = x_flt[2]
+        self.current['com']['pos'][1] = x_flt[3]
+        self.current['com']['vel'][1] = x_flt[4]
+        self.current['zmp']['pos'][1] = x_flt[5]
 
-    #     # get foot trajectories
-    #     feet_trajectories = self.foot_trajectory_generator.generate_feet_trajectories_at_time(self.time)
-    #     self.desired['lsole']['pos'] = feet_trajectories['left']['pos']
-    #     self.desired['lsole']['vel'] = feet_trajectories['left']['vel']
-    #     self.desired['lsole']['acc'] = feet_trajectories['left']['acc']
-    #     self.desired['rsole']['pos'] = feet_trajectories['right']['pos']
-    #     self.desired['rsole']['vel'] = feet_trajectories['right']['vel']
-    #     self.desired['rsole']['acc'] = feet_trajectories['right']['acc']
+        # --- CoM/ZMP reference from the MPC ---
+        lip_state, contact = self.mpc.solve(self.current, t)
+        # osqp can return raw infeasibility values (~2^31) instead of raising
+        # when it hits max_iter; those pass np.isfinite. Any physically
+        # implausible reference (faster than 100 m/s from the origin) means
+        # the QP diverged.
+        if np.any(np.abs(lip_state['com']['pos']) > 100.) \
+                or np.any(np.abs(lip_state['zmp']['pos']) > 100.):
+            print(f"[Hrp4Controller] MPC QP diverged at tick {self.time}; "
+                  "holding previous torque command")
+            self.time += 1
+            return self.tau_cmd
+        if contact == 'ds':
+            pass  # keep the previous support foot
+        elif contact == 'ssleft':
+            self.contact = 'lsole'
+        elif contact == 'ssright':
+            self.contact = 'rsole'
 
-    #     # set torso and base references to the average of the feet
-    #     self.desired['torso']['pos'] = (self.desired['lsole']['pos'][:3] + self.desired['rsole']['pos'][:3]) / 2.
-    #     self.desired['torso']['vel'] = (self.desired['lsole']['vel'][:3] + self.desired['rsole']['vel'][:3]) / 2.
-    #     self.desired['torso']['acc'] = (self.desired['lsole']['acc'][:3] + self.desired['rsole']['acc'][:3]) / 2.
-    #     self.desired['base']['pos']  = (self.desired['lsole']['pos'][:3] + self.desired['rsole']['pos'][:3]) / 2.
-    #     self.desired['base']['vel']  = (self.desired['lsole']['vel'][:3] + self.desired['rsole']['vel'][:3]) / 2.
-    #     self.desired['base']['acc']  = (self.desired['lsole']['acc'][:3] + self.desired['rsole']['acc'][:3]) / 2.
+        self.desired['com']['pos'] = lip_state['com']['pos']
+        self.desired['com']['vel'] = lip_state['com']['vel']
+        self.desired['com']['acc'] = lip_state['com']['acc']
+        self.desired['zmp']['pos'] = lip_state['zmp']['pos']
+        self.desired['zmp']['vel'] = lip_state['zmp']['vel']
+        # The LIP model is planar: its com z is the constant h. Command the
+        # measured initial height instead so the com task does not fight the
+        # actual crouch of the robot.
+        self.desired['com']['pos'][2] = self.com_height
 
-    #     # get torque commands using inverse dynamics
-    #     commands = self.id.get_joint_torques(self.desired, self.current, contact)
-        
-    
+        # --- foot swing trajectories ---
+        feet_traj = self.foot_trajectory_generator.generate_feet_trajectories_at_time(t)
+        for side, foot in (('left', 'lsole'), ('right', 'rsole')):
+            self.desired[foot]['pos'] = feet_traj[side]['pos']
+            self.desired[foot]['vel'] = feet_traj[side]['vel']
+            self.desired[foot]['acc'] = feet_traj[side]['acc']
 
+        # --- torso/base orientation reference: average of the feet rotations ---
+        # (orientation-only task; a flat-footed gait keeps the rotvec blocks ~0)
+        for frame in ('torso', 'base'):
+            self.desired[frame]['pos'] = (self.desired['lsole']['pos'][:3]
+                                           + self.desired['rsole']['pos'][:3]) / 2.
+            self.desired[frame]['vel'] = (self.desired['lsole']['vel'][:3]
+                                           + self.desired['rsole']['vel'][:3]) / 2.
+            self.desired[frame]['acc'] = (self.desired['lsole']['acc'][:3]
+                                           + self.desired['rsole']['acc'][:3]) / 2.
+
+        # --- whole-body inverse dynamics QP (joint task holds the initial posture) ---
+        tau = self.id.get_joint_torques(self.desired, self.current, contact)
+        self.tau_cmd = np.clip(tau, -100., 100.)  # URDF effort limit
+
+        # --- logging ---
+        self.logger.log_data(self._loggable(self.desired), self._loggable(self.current))
+        if self.use_gui and self.time % 10 == 0:
+            self.logger.update_plot()
+
+        self.time += 1
+        return self.tau_cmd
