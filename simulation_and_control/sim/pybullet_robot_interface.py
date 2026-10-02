@@ -216,7 +216,10 @@ class SimRobot():
         # TODO I could consider add this flag to get a closer behaviour to pinocchio URDF_MERGE_FIXED_LINKS, not really it does not work well
         #Loads the URDF file for the robot.#
         if self.self_collision_enabled:
-            flags = pybullet_client.URDF_USE_INERTIA_FROM_FILE | pybullet_client.URDF_USE_SELF_COLLISION
+            # pybullet approximates urdf cylinders as polygonal convex hulls,
+            # turning wheels into polygonal drums that wedge under load and
+            # stall velocity-controlled bases, so we load analytic cylinders
+            flags = pybullet_client.URDF_USE_INERTIA_FROM_FILE | pybullet_client.URDF_USE_SELF_COLLISION | pybullet_client.URDF_USE_IMPLICIT_CYLINDER
             if(self.base_type=="fixed"):
                 self.bot_pybullet = pybullet_client.loadURDF(
                     urdf_file,
@@ -237,14 +240,14 @@ class SimRobot():
                     urdf_file, self._GetDefaultInitPosition(),
                     self._GetDefaultInitOrientation(),
                     useFixedBase=True,
-                    flags=pybullet_client.URDF_USE_INERTIA_FROM_FILE)
-               
+                    flags=pybullet_client.URDF_USE_INERTIA_FROM_FILE | pybullet_client.URDF_USE_IMPLICIT_CYLINDER)
+                
             else:
                 self.bot_pybullet = pybullet_client.loadURDF(
                     urdf_file, self._GetDefaultInitPosition(),
                     self._GetDefaultInitOrientation(),
                     useFixedBase=False,
-                    flags=pybullet_client.URDF_USE_INERTIA_FROM_FILE)
+                    flags=pybullet_client.URDF_USE_INERTIA_FROM_FILE | pybullet_client.URDF_USE_IMPLICIT_CYLINDER)
 
                 
         if self.base_type=="on_rack":
@@ -1836,7 +1839,7 @@ class SimInterface():
                                                   link_id,
                                                   lateralFriction=foot_friction)
     def SetFloorFriction(self, floor_friction):
-        self.pybullet_client.changeDynamics(self.ground_body, -1, lateralFriction=1.0)
+        self.pybullet_client.changeDynamics(self.ground_body, -1, lateralFriction=floor_friction)
 
 
     def GetFootRestitution(self,index=0):
