@@ -1266,6 +1266,103 @@ class SimInterface():
             link_pos_floating_base_world, link_ori_floating_base_world = self.GetLinkPositionAndOrientation(link_name, "joint")
             return link_pos_floating_base_world, link_ori_floating_base_world
 
+    # camera functions ------------------------------------------------------------------------------
+    # these helpers expose the pybullet offscreen rendering for both a generic camera placed
+    # anywhere in the world (GetCameraImage) and a camera rigidly mounted on a robot link
+    # (GetCameraImageFromLink, ComputeCameraViewFromLink), so an eye-in-hand camera can be
+    # simulated by calling them at every control step.
+
+    # converts the raw pixel buffers returned by pybullet getCameraImage into numpy arrays.
+    # pybullet returns the buffers with the opengl convention (first pixel row at the bottom),
+    # so the images are flipped vertically here to get the usual top-left origin orientation.
+    def _CameraBufferToArrays(self, img_w, img_h, rgba_buffer, depth_buffer, seg_buffer):
+        def to_array(buf, dtype):
+            if isinstance(buf, (bytes, bytearray)):
+                return np.frombuffer(buf, dtype=dtype)
+            return np.asarray(buf, dtype=dtype)
+        rgba = to_array(rgba_buffer, np.uint8)
+        # the number of channels depends on the pybullet build (older builds return rgba, newer rgb)
+        n_channels = rgba.size // (img_w * img_h)
+        rgba = np.flipud(rgba.reshape(img_h, img_w, n_channels))
+        depth = np.flipud(to_array(depth_buffer, np.float32).reshape(img_h, img_w))
+        seg = np.flipud(to_array(seg_buffer, np.uint8).reshape(img_h, img_w))
+        return rgba, depth, seg
+
+    # renders an image from a camera given its view and projection matrices (as returned by
+    # pybullet computeViewMatrix/computeProjectionMatrixFOV or by ComputeCameraViewFromLink).
+    # renderer can be used to force pybullet.ER_TINY_RENDERER (software, works headless) or
+    # pybullet.ER_BULLET_HARDWARE_OPENGL, by default the opengl renderer is used when the gui
+    # is running and the software renderer when running headless.
+    # returns (rgba, depth, seg) as (img_h, img_w) numpy arrays: rgba is uint8 with 3 or 4
+    # channels depending on the pybullet build, depth is the raw opengl depth buffer in [0, 1]
+    # (the metric depth is far*near/(far-(far-near)*depth) with the near/far values used in the
+    # projection matrix) and seg is uint8 with the body unique id of each pixel (255 = no body).
+    def _RenderCameraImage(self, view_matrix, projection_matrix, img_w=640, img_h=480,
+                           renderer=None):
+        if renderer is None:
+            if self.use_gui:
+                renderer = pybullet.ER_BULLET_HARDWARE_OPENGL
+            else:
+                renderer = pybullet.ER_TINY_RENDERER
+        image = self.pybullet_client.getCameraImage(
+            img_w, img_h, view_matrix, projection_matrix, renderer=renderer)
+        return self._CameraBufferToArrays(img_w, img_h, image[2], image[3], image[4])
+
+    # renders an image from a generic camera placed anywhere in the world frame.
+    # cam_eye is the camera position, cam_target the point the camera looks at and cam_up the
+    # up direction of the camera (all in world frame, see pybullet computeViewMatrix).
+    # returns (rgba, depth, seg) as documented in _RenderCameraImage.
+    def GetCameraImage(self, cam_eye, cam_target, cam_up, img_w=640, img_h=480,
+                       fov_deg=60.0, near=0.01, far=100.0, renderer=None):
+        projection_matrix = self.pybullet_client.computeProjectionMatrixFOV(
+            fov_deg, img_w / img_h, near, far)
+        view_matrix = self.pybullet_client.computeViewMatrix(cam_eye, cam_target, cam_up)
+        return self._RenderCameraImage(view_matrix, projection_matrix, img_w, img_h, renderer)
+
+    # computes the view and projection matrices of a camera rigidly attached to a robot link
+    # (eye-in-hand camera): the camera optical center is placed at camera_offset_pos in the
+    # link frame and the optical axis / up direction are given by camera_forward_link and
+    # camera_up_link in the link frame (they must not be parallel), so the camera looks along
+    # camera_forward_link while the link moves. the returned matrices can be passed to
+    # pybullet getCameraImage for full control over the rendering flags.
+    def ComputeCameraViewFromLink(self, link_name, img_w=640, img_h=480, fov_deg=60.0,
+                                  near=0.01, far=100.0,
+                                  camera_offset_pos=(0.0, 0.0, 0.0),
+                                  camera_forward_link=(0.0, 0.0, 1.0),
+                                  camera_up_link=(0.0, 1.0, 0.0),
+                                  index=0):
+        link_pos, link_ori = self.GetLinkPositionAndOrientation(link_name, "joint", index)
+        if not link_pos:
+            # GetLinkPositionAndOrientation already printed the error message
+            return [], []
+        R_link_world = np.array(self.pybullet_client.getMatrixFromQuaternion(link_ori)).reshape(3, 3)
+        cam_pos = np.asarray(link_pos) + R_link_world @ np.asarray(camera_offset_pos, dtype=float)
+        cam_forward = R_link_world @ np.asarray(camera_forward_link, dtype=float)
+        cam_up = R_link_world @ np.asarray(camera_up_link, dtype=float)
+        cam_target = cam_pos + cam_forward
+        projection_matrix = self.pybullet_client.computeProjectionMatrixFOV(
+            fov_deg, img_w / img_h, near, far)
+        view_matrix = self.pybullet_client.computeViewMatrix(cam_pos, cam_target, cam_up)
+        return view_matrix, projection_matrix
+
+    # renders the image of an eye-in-hand camera rigidly attached to a robot link: the camera
+    # pose is computed from the current link pose at every call, so calling this inside the
+    # control loop returns the camera stream while the robot moves.
+    # returns (rgba, depth, seg) as documented in _RenderCameraImage.
+    def GetCameraImageFromLink(self, link_name, img_w=640, img_h=480, fov_deg=60.0,
+                               near=0.01, far=100.0,
+                               camera_offset_pos=(0.0, 0.0, 0.0),
+                               camera_forward_link=(0.0, 0.0, 1.0),
+                               camera_up_link=(0.0, 1.0, 0.0),
+                               renderer=None, index=0):
+        view_matrix, projection_matrix = self.ComputeCameraViewFromLink(
+            link_name, img_w, img_h, fov_deg, near, far,
+            camera_offset_pos, camera_forward_link, camera_up_link, index)
+        if not view_matrix:
+            print("ERROR: cannot render the camera image, the link " + link_name + " was not found")
+            return [], [], []
+        return self._RenderCameraImage(view_matrix, projection_matrix, img_w, img_h, renderer)
+
     # here we assume the initial position is the link position and not the com position
     # I need to do the convesion from the floating base of the link to the one of the com
     def GetConfInitPosition(self,index):
